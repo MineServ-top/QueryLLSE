@@ -1,0 +1,9 @@
+{
+    "dependencies": {
+      "crypto": "^1.0.1",
+      "dgram": "^1.0.1",
+      "properties-reader": "^2.2.0",
+      "buffercursor": "^0.0.12"
+    }
+}
+  

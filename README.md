@@ -1,2 +1,3 @@
-# QueryLLSE
-Поддержка протокола Query для серверов использующих LLBDS от MineServ
+Plugin for LiteLoader BDS.
+
+Add Query protocol for Vanilla Bedrock server
