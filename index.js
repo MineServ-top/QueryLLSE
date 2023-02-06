@@ -2,6 +2,7 @@
 //=== For https://mineserv.top ===
 logger.setTitle("\x1b[95mLL Query\x1b[37m")
 logger.setLogLevel(4)
+ll.registerPlugin('QueryLLSE', 'Поддержка протокола Query для серверов использующих LLBDS от MineServ', [1,0,0])
 const dgram = require('dgram')//UDP datagram socket
 var server = dgram.createSocket('udp4')//Open UDP v4 socket
 var BufferCursor = require('buffercursor')//Buffer Util
