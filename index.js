@@ -1,172 +1,231 @@
-//=== Query ===
-//=== For https://mineserv.top ===
-logger.setTitle("\x1b[95mLL Query\x1b[37m")
-logger.setLogLevel(4)
-ll.registerPlugin('QueryLLSE', 'Поддержка протокола Query для серверов использующих LLBDS от MineServ', [1,0,0])
-const dgram = require('dgram')//UDP datagram socket
-var server = dgram.createSocket('udp4')//Open UDP v4 socket
-var BufferCursor = require('buffercursor')//Buffer Util
-const config = new JsonConfigFile('./plugins/MineServ/query/config.json')//Config
-config.init('query-port',30333)
-var pr = require('properties-reader')
-var properties = pr('./server.properties')
-var onlinePlayers = new Map()
-var playerNum = 0
-mc.listen('onJoin',function(pl){
-    onlinePlayers.set(pl.realName,pl.xuid)
-    playerNum ++
-})
-mc.listen('onLeft',function(pl){
-    onlinePlayers.delete(pl.realName)
-    playerNum --
-})
-//Bedrock RakNet Pong
-var serverId = BigInt(Math.floor(Math.random() * 10000000000000000)) //RakNet Server ID
-const MAGIC = Buffer.from([0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78]) //RakNet MagickData
-const un_ping = 0x01 //RakNet Unconnected Ping
-const un_pong = 0x1c //RakNet Unconnected Pong
+const dgram = require("dgram");
+const { SmartBuffer } = require('@harmonytf/smart-buffer');
+const properties = require('properties-reader');
+const config_file = new JsonConfigFile('./plugins/QueryLLSE/config.json');
+const pr = properties('./server.properties');
+if(!config_file.get('QueryServer')){
+    logger.warn(`Configuration file not found, creating!`)
+    config_file.init('QueryServer', {
+      host: "0.0.0.0",
+      port: 25565,
 
-function pongBe(port, addr, pingTime) {
-    let data = Buffer.alloc(17)
-    let status = `MCPE;${properties.get('server-name')};${mc.getServerProtocolVersion()};${mc.getBDSVersion().replace('v','')};0;${properties.get('max-players')};${serverId};${properties.get('level-name')};${properties.get('gamemode')};1`//Responce
-    data.writeInt8(un_pong, 0)
-    data.writeBigInt64BE(pingTime, 1)
-    data.writeBigInt64BE(serverId, 9)
-    data = Buffer.concat([data, MAGIC], 1024)
-    data.writeInt16BE(status.length, 33)
-    data.write(status, 35, status.length, 'utf8')
-    server.send(data.subarray(0, 35 + status.length), port, addr, (err) => {})
-    logger.debug('Reply: '+status)
+      maxPlayers: "default",
+      motd: "default",
+      map: "default",
+      gameMode: "default",
+      wl: "default",
+      gameID: "default",
+      version: "default",
+      tokenLifetime: "default"
+    });
+    logger.warn(`The config file has been created and is located in \x1b[1m\x1b[32m"./plugins/QueryLLSE/config.json"\x1b[0m!`);
 }
-//Java Query Pong
-var token
-setInterval(() => {
-    min = Math.ceil(1000000)
-    max = Math.floor(9999999)
-    token = Math.floor(Math.random() * (max - min) + min)
-}, 120000)
-function pongJe(port, addr, msg){
-    if(msg.readInt8(2) == 9){//handshake packet
-        let bc = new BufferCursor(Buffer.alloc(13))
-        bc.writeInt8(0x09)
-        bc.writeInt32BE(msg.readInt32BE(3))
-        bc.write(token+'\0')
-        server.send(bc.buffer, port, addr, (err) => {})
-        logger.debug('Reply: '+bc.buffer)
+const config = config_file.get('QueryServer');
+ll.registerPlugin('QueryLLSE', 'Minecraft Query protocol support.', [2,0,0]);
+logger.setTitle("\x1b[95mQueryLLSE\x1b[37m");
+class QueryServer {
+  constructor(options = {}) {
+    this.host = options.host || "0.0.0.0";
+    this.port = options.port || 25565;
+
+    this.players = new Map();
+    this.maxPlayers = options.maxPlayers || 20;
+    this.motd = options.motd || "A Minecraft Server";
+    this.map = options.map || "World";
+    this.gameMode = options.gameMode || "Survival";
+    this.wl = options.wl || "off";
+    this.gameID = options.gameID || "MINECRAFTBE";
+    this.version = options.version || "1.19.70";
+    this.clientTokens = new Map();
+    this.tokenLifetime = options.tokenLifetime || 30;
+    this.socket = dgram.createSocket("udp4");
+    this.socket.bind(this.port, this.host, () => {
+      logger.debug(`Server is listening on ${this.host}:${this.port}`);
+    });
+    this.socket.on('listening', () => {
+        const address = this.socket.address();
+        logger.info(`\x1b[94mMinecraft Query server started on \x1b[93m${address.address}:${address.port}\x1b[94m!`);
+    });
+    this.socket.on("message", (message, rinfo) => this.handleMessage(message, rinfo));
+  }
+
+  genToken() {
+    const min = Math.ceil(1000000);
+    return Math.floor(Math.random() * (Math.floor(9999999) - min + 1) + min);
+  }
+
+  handleMessage(message, rinfo) {
+    const magick = message.readUInt16BE(0);
+    const type = message.readUInt8(2);
+    if (magick !== 0xfefd) {
+      logger.debug(`Client ${rinfo.address}:${rinfo.port} send bad data!`);
+      return;
     }
-    else if(msg.readInt8(2) == 0){
-        let gm
-        switch (properties.get('gamemode')){
-            case 'survival':
-                gm = 'SMP'
-                break;
-            case 'creative':
-                gm = 'CMP'
-            break;
-            case 'adventure':
-                gm = 'AMP'
-            break;
-            default:
-                gm = 'SMP'
-            break;
-        }
-        let wl
-        if(properties.get('allow-list') == false){
-            wl = 'off'
-        }
-        if(properties.get('allow-list') == true){
-            wl = 'on'
-        }
-        if(msg.length == 15){//long query packet
-            let KVdata = new Map()
-            KVdata.set("hostname", String(properties.get('server-name')))
-            KVdata.set("gametype", String(gm))
-            KVdata.set("game_id", String('MINECRAFTPE'))
-            KVdata.set("version", String(mc.getBDSVersion().replace('v','')))
-            KVdata.set("server_engine", String('Bedrock Dedicated Server'))
-            KVdata.set("plugins",String( `BDS:LiteLoaderBDS v${ll.versionString()};LLQuery v1.0;`))
-            KVdata.set("map", String(properties.get('level-name')))
-            KVdata.set("numplayers", '0')
-            KVdata.set("maxplayers", String(properties.get('max-players')))
-            KVdata.set("whitelist", String(wl))
-            KVdata.set("hostip", String('0.0.0.0'))
-            KVdata.set("hostport", String(properties.get('server-port')))
-            let d = new BufferCursor(Buffer.alloc(512))
-            d.writeInt8(0x00)
-            d.writeInt32BE(msg.readInt32BE(3))
-            d.write("splitnum")
-            d.writeInt16BE(0x0080)
-            d.writeInt8(0x00)
-            KVdata.forEach((v,k)=>{
-                d.write(k)
-                d.writeInt8(0x00)
-                d.write(v)
-                d.writeInt8(0x00)
-            })
-            d.writeInt8(0x00)
-            d.writeInt8(0x01)
-            d.write("player_")
-            d.writeInt8(0x00)
-            d.writeInt8(0x00)
-            onlinePlayers.forEach((v,k)=>{
-                d.write(k.replace(' ','-'))
-                d.writeInt8(0x00)
-            })
-            d.writeInt8(0x00)
-            server.send(d.buffer, port, addr, (err) => {})
-            logger.debug('Reply: '+d.buffer)
-        }
-        else{
-            let d = new BufferCursor(Buffer.alloc(512))
-            d.writeInt8(0x00)
-            d.writeInt32BE(msg.readInt32BE(3))
-            d.write(String(properties.get('server-name')))
-            d.writeInt8(0x00)
-            d.write(String(gm))
-            d.writeInt8(0x00)
-            d.write(String(properties.get('level-name')))
-            d.writeInt8(0x00)
-            d.write(String(mc.getOnlinePlayers().length))
-            d.writeInt8(0x00)
-            d.write(String(properties.get('max-players')))
-            d.writeInt8(0x00)
-            d.write(String(properties.get('server-port')))
-            d.write(String('0.0.0.0'))
-            d.writeInt8(0x00)
-            server.send(d.buffer, port, addr, (err) => {})
-            logger.debug('Reply: '+d.buffer)
-        }
+    if ((this.clientTokens.has(rinfo.address) && this.clientTokens.get(rinfo.address).expiresAt < Date.now()) || !this.clientTokens.has(rinfo.address)) {
+      this.clientTokens.set(rinfo.address, {
+        token: this.genToken(),
+        expiresAt: Date.now() + this.tokenLifetime * 1000,
+      });
     }
+
+    if (type === 0x09) {
+      this.sendHandshake(rinfo, message);
+    } else if (type === 0x00 && message.length == 15) {
+      this.sendFullInfo(rinfo, message);
+    } else if (type === 0x00 && message.length == 11) {
+      this.sendBasicInfo(rinfo, message);
+    } 
+  }
+
+  sendHandshake(rinfo, message) {
+    const sessionID = message.readInt32BE(3);
+    const clientToken = this.clientTokens.get(rinfo.address).token;
+    if (!this.clientTokens.has(rinfo.address) || this.clientTokens.get(rinfo.address).expiresAt < Date.now()) {
+      return;
+    }
+  
+    const buffer = new SmartBuffer();
+    buffer
+      .writeUInt8(0x09) // packet ID
+      .writeInt32BE(sessionID) // session ID
+      .writeStringNT(clientToken.toString()) // challenge token
+  
+    const data = buffer.toBuffer();
+  
+    this.socket.send(data, 0, data.length, rinfo.port, rinfo.address, (err) => {
+      if (err) {
+        logger.error(err);
+      }
+    });
+  }
+  
+
+  sendBasicInfo(rinfo, message) {
+    const sessionID = message.readInt32BE(3);
+    const cToken = message.readInt32BE(7).toString();
+
+    if (
+      !this.clientTokens.has(rinfo.address) ||
+      this.clientTokens.get(rinfo.address).expiresAt < Date.now() ||
+      cToken !== this.clientTokens.get(rinfo.address).token
+    ) {
+      return;
+    }
+  
+    const buffer = new SmartBuffer();
+    buffer
+      .writeUInt8(0x00) // packet ID
+      .writeInt32BE(sessionID) // session ID
+      .writeStringNT(this.motd) // MOTD
+      .writeStringNT(this.gameID) // game ID (type)
+      .writeStringNT(this.map) // server map
+      .writeStringNT(this.players.size) // current number of players
+      .writeStringNT(this.maxPlayers) // maximum number of players
+      .writeUInt16LE(this.port) // server port in little-endian short format
+      .writeStringNT(this.host) // server IP
+  
+    const data = buffer.toBuffer();
+  
+    this.socket.send(data, 0, data.length, rinfo.port, rinfo.address, (err) => {
+      if (err) {
+        logger.error(err);
+      }
+    });
+  }  
+
+  sendFullInfo(rinfo, message) {
+    const sessionID = message.readInt32BE(3);
+    const clientToken = this.clientTokens.get(rinfo.address).token;
+
+    if (
+      !this.clientTokens.has(rinfo.address) ||
+      this.clientTokens.get(rinfo.address).expiresAt < Date.now() ||
+      clientToken !== this.clientTokens.get(rinfo.address).token
+    ) {
+      return;
+    }
+    const kvData = [
+      { key: "hostname", value: this.motd },
+      { key: "gametype", value: this.gameMode },
+      { key: "game_id", value: this.gameID },
+      { key: "version", value: this.version },
+      { key: "server_engine", value: "Bedrock Dedicated Server" },
+      { key: "plugins", value: "BDS:QueryLLSE v2" },
+      { key: "map", value: this.map },
+      { key: "numplayers", value: this.players.size },
+      { key: "maxplayers", value: this.maxPlayers },
+      { key: "whitelist", value: this.wl },
+      { key: "hostip", value: this.host },
+      { key: "hostport", value: this.port },
+    ];
+
+    const buffer = new SmartBuffer();
+    buffer
+    .writeUInt8(0x00) // packet ID
+    .writeInt32BE(sessionID) // session ID
+    .writeStringNT("splitnum") // Padding
+    .writeUInt8(0x80) // Padding
+    .writeUInt8(0x00) // Padding
+    kvData.forEach(({ key, value }) => {// K, V section
+      buffer.writeStringNT(String(key));
+      buffer.writeStringNT(String(value));
+    });
+    buffer
+    .writeUInt8(0x00) // Padding
+    .writeUInt8(0x01) // Padding
+    .writeStringNT("player_") // Padding
+    .writeUInt8(0x00) // Padding
+    for (const [playerName] of this.players) {// Players section
+      buffer.writeStringNT(playerName);
+    }
+    buffer.writeUInt8(0x00)// terminating
+
+    const data = buffer.toBuffer();
+    this.socket.send(data, 0, data.length, rinfo.port, rinfo.address, (err) => {
+      if (err) {
+        logger.error(err);
+      }
+    });
+  }
+
+  addPlayer(player) {
+    this.players.set(player.realName, player.xuid);
+  }
+
+  removePlayer(player) {
+    this.players.delete(player.realName);
+  }
+
+  stop() {
+    this.socket.close(() => {
+      logger.debug(`Query server is stopped`);
+    });
+  }
 }
-server.on('error', (err) => {
-    logger.error(`server error:\n${err}`)
-});
-server.on('message', (msg, rinfo) => {
-    if ((msg.readInt8(0) & 0xff) == un_ping){
-        try {
-            logger.debug('BE request: port: '+rinfo.port+' addr: '+rinfo.address+' data: '+msg)
-            pongBe(rinfo.port, rinfo.address, msg.readBigInt64BE(1))
-        } catch (err){
-            logger.debug(`Bad data:\n${msg}\n${err}`)
-        }
-    }
-    else if(msg.readInt8(0) == -2){
-        try {
-            logger.debug('JE request: port: '+rinfo.port+' addr: '+rinfo.address+' data: '+msg)
-            pongJe(rinfo.port, rinfo.address, msg)
-        } catch (err){
-            logger.debug(`Bad data:\n${msg}\n${err}`)
-        }
+
+const query = new QueryServer({
+  host: config.host !== "default" ? config.host : "0.0.0.0",
+  port: config.port !== "default" ? config.port : 25565,
+  
+  maxPlayers: config.maxPlayers !== "default" ? config.maxPlayers : pr.get('max-players'),
+  motd: config.motd !== "default" ? config.motd : pr.get('server-name'),
+  map: config.map !== "default" ? config.map : pr.get('level-name'),
+  gameMode: config.gameMode !== "default" ? config.gameMode : pr.get('gamemode'),
+  wl: config.wl !== "default" ? config.port : pr.get('allow-list'),
+  gameID: config.gameID !== "default" ? config.gameID : "MINECRAFTBE",
+  version: config.version !== "default" ? config.version : mc.getBDSVersion().replace('v',''),
+  tokenLifetime: config.tokenLifetime !== "default" ? config.tokenLifetime : 30
+})
+
+mc.listen("onConsoleCmd",(cmd) => {
+    if(cmd === 'll reload' || cmd === 'll reload RConLLSE'){
+        query.stop()
     }
 })
-server.on('listening', () => {
-    const address = server.address();
-    logger.info(`\x1b[94mquery started on \x1b[93m${address.address}:${address.port}\x1b[94m!`)
-    logger.info('\x1b[94mcheck \x1b[93m./plugins/MineServ/query/config.json \x1b[94mto configure query')
+
+mc.listen('onJoin', (player) => {
+    query.addPlayer(player)
 });
-server.on('close', () => {
-    try {
-        logger.info('\x1b[91mclose query')
-    } catch (err) {}
+mc.listen('onLeft', (player) => {
+    query.removePlayer(player)
 });
-server.bind(config.get('query-port'), "0.0.0.0")
